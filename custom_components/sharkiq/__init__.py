@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -40,6 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SharkIqConfigEntry) -> b
     ayla_api._auth0_id_token = entry.data.get(CONF_ID_TOKEN)
     ayla_api._refresh_token = entry.data[CONF_REFRESH_TOKEN]
     ayla_api._is_authed = True
+    ayla_api._auth_expiration = datetime.now() + timedelta(hours=24)
 
     # Try to refresh tokens on startup to ensure they're current
     try:
