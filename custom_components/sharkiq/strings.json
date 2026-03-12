@@ -3,15 +3,18 @@
     "step": {
       "user": {
         "title": "Shark IQ Login",
-        "description": "1. Open this URL in your browser:\n\n{authorize_url}\n\n2. Log in with your SharkClean account (solve captcha if needed)\n3. After login, the browser will redirect to a `com.sharkninja.shark://` URL that won't load\n4. Copy the FULL URL from the address bar and paste it below\n\nTokens are saved and auto-refreshed, so you only need to do this once.",
+        "description": "SharkNinja makes this difficult \u2014 their login uses captcha and a mobile-only redirect, so you may need browser DevTools to complete setup. [See the full walkthrough](https://github.com/dr34ming/ha-sharkiq#setup)\n\n1. Open this URL in your browser (with DevTools Network tab open):\n\n{authorize_url}\n\n2. Log in with your SharkClean account\n3. After login, the browser redirects to a `com.sharkninja.shark://` URL \u2014 this shows a gray screen or error, that's normal\n4. In DevTools Network tab, find the 302 redirect and copy the `location` header value (`com.sharkninja.shark://...?code=...`)\n5. Paste it below and submit quickly \u2014 the code expires in ~30 seconds\n\nTokens are saved and auto-refreshed, so you only need to do this once.",
         "data": {
           "callback_url": "Callback URL"
+        },
+        "data_description": {
+          "callback_url": "The com.sharkninja.shark://...?code=... URL from the 302 redirect Location header in DevTools"
         }
       }
     },
     "error": {
       "no_code": "No authorization code found in URL. Copy the full callback URL including the ?code= parameter.",
-      "auth_failed": "Auth0 token exchange failed. The code may have expired — try starting over.",
+      "auth_failed": "Auth0 token exchange failed. The code may have expired \u2014 try starting over with a fresh flow.",
       "ayla_failed": "Connected to Auth0 but Ayla token exchange failed. SharkNinja services may be down."
     },
     "abort": {
