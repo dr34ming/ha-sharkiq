@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -51,11 +52,15 @@ class SharkIqConfigFlow(ConfigFlow, domain=DOMAIN):
             password = user_input[CONF_PASSWORD]
 
             try:
-                auth0_tokens = await self._do_auth0_login(username, password)
+                async with asyncio.timeout(30):
+                    auth0_tokens = await self._do_auth0_login(username, password)
             except AuthRateLimited:
                 errors["base"] = "rate_limited"
             except AuthInvalid:
                 errors["base"] = "invalid_auth"
+            except TimeoutError:
+                _LOGGER.error("Auth0 login timed out")
+                errors["base"] = "cannot_connect"
             except Exception:
                 _LOGGER.exception("Unexpected auth error")
                 errors["base"] = "unknown"
@@ -63,9 +68,13 @@ class SharkIqConfigFlow(ConfigFlow, domain=DOMAIN):
             if not errors:
                 # Exchange Auth0 id_token for Ayla tokens
                 try:
-                    ayla_tokens = await self._exchange_ayla_token(
-                        auth0_tokens["id_token"]
-                    )
+                    async with asyncio.timeout(15):
+                        ayla_tokens = await self._exchange_ayla_token(
+                            auth0_tokens["id_token"]
+                        )
+                except TimeoutError:
+                    _LOGGER.error("Ayla token exchange timed out")
+                    errors["base"] = "cannot_connect"
                 except Exception:
                     _LOGGER.exception("Ayla token exchange failed")
                     errors["base"] = "cannot_connect"
