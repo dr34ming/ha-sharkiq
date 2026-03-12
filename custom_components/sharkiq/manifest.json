@@ -1,0 +1,10 @@
+{
+  "domain": "sharkiq",
+  "name": "Shark IQ Robot Vacuums (HACS)",
+  "codeowners": ["@dr34ming"],
+  "config_flow": true,
+  "documentation": "https://github.com/dr34ming/ha-sharkiq",
+  "iot_class": "cloud_polling",
+  "requirements": ["sharkiq==1.5.0"],
+  "version": "0.1.0"
+}
