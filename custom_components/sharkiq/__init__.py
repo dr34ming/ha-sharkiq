@@ -54,7 +54,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SharkIqConfigEntry) -> b
 
     # Fetch devices
     try:
-        devices = await ayla_api.async_list_devices()
+        devices = await ayla_api.async_get_devices(update=False)
     except Exception as err:
         _LOGGER.error("Failed to list devices: %s", err)
         raise ConfigEntryAuthFailed(
