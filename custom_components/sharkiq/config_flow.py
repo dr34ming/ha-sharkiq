@@ -1,20 +1,16 @@
-"""Config flow for Shark IQ Robot Vacuums (HACS) — PKCE auth."""
+"""Config flow for Shark IQ Robot Vacuums (HACS) — browser-sim Auth0 + token persistence."""
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import json
 import logging
-import secrets
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.const import CONF_USERNAME
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 
 from .const import (
     AUTH0_CLIENT_ID,
@@ -32,26 +28,11 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-
-def _generate_pkce() -> tuple[str, str]:
-    """Generate PKCE code_verifier and code_challenge (S256)."""
-    verifier = secrets.token_urlsafe(32)
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return verifier, challenge
-
-
-def _build_authorize_url(code_challenge: str) -> str:
-    """Build the Auth0 PKCE authorize URL."""
-    params = {
-        "response_type": "code",
-        "client_id": AUTH0_CLIENT_ID,
-        "redirect_uri": AUTH0_REDIRECT_URI,
-        "scope": AUTH0_SCOPES,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-    return f"{AUTH0_URL}/authorize?{urlencode(params)}"
+BROWSER_UA = (
+    "Mozilla/5.0 (Linux; Android 10; K) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/139.0.0.0 Mobile Safari/537.36"
+)
 
 
 class SharkIqConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -59,140 +40,164 @@ class SharkIqConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    def __init__(self) -> None:
-        """Initialize."""
-        self._code_verifier: str | None = None
-        self._authorize_url: str | None = None
-
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 1: Show the Auth0 login URL and ask user to paste callback URL."""
-        if user_input is None:
-            # Generate PKCE pair and build URL
-            self._code_verifier, code_challenge = _generate_pkce()
-            self._authorize_url = _build_authorize_url(code_challenge)
-            return self.async_show_form(
-                step_id="user",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("callback_url"): str,
-                    }
-                ),
-                description_placeholders={
-                    "authorize_url": self._authorize_url,
-                },
-            )
-
-        # User pasted the callback URL — extract the authorization code
+        """Handle the initial step — username/password form."""
         errors: dict[str, str] = {}
-        callback_url = user_input["callback_url"].strip()
 
-        try:
-            parsed = urlparse(callback_url)
-            qs = parse_qs(parsed.query)
-            if not qs:
-                # Some callbacks use fragment instead of query
-                qs = parse_qs(parsed.fragment)
-            code = qs.get("code", [None])[0]
-        except Exception:
-            code = None
+        if user_input is not None:
+            username = user_input[CONF_USERNAME]
+            password = user_input[CONF_PASSWORD]
 
-        if not code:
-            errors["callback_url"] = "no_code"
-            return self.async_show_form(
-                step_id="user",
-                data_schema=vol.Schema(
-                    {vol.Required("callback_url"): str}
-                ),
-                description_placeholders={
-                    "authorize_url": self._authorize_url or "",
-                },
-                errors=errors,
-            )
+            try:
+                auth0_tokens = await self._do_auth0_login(username, password)
+            except AuthRateLimited:
+                errors["base"] = "rate_limited"
+            except AuthInvalid:
+                errors["base"] = "invalid_auth"
+            except Exception:
+                _LOGGER.exception("Unexpected auth error")
+                errors["base"] = "unknown"
 
-        # Exchange code for Auth0 tokens
-        try:
-            auth0_tokens = await self._exchange_code(code)
-        except Exception:
-            _LOGGER.exception("Failed to exchange Auth0 code")
-            errors["callback_url"] = "auth_failed"
-            return self.async_show_form(
-                step_id="user",
-                data_schema=vol.Schema(
-                    {vol.Required("callback_url"): str}
-                ),
-                description_placeholders={
-                    "authorize_url": self._authorize_url or "",
-                },
-                errors=errors,
-            )
+            if not errors:
+                # Exchange Auth0 id_token for Ayla tokens
+                try:
+                    ayla_tokens = await self._exchange_ayla_token(
+                        auth0_tokens["id_token"]
+                    )
+                except Exception:
+                    _LOGGER.exception("Ayla token exchange failed")
+                    errors["base"] = "cannot_connect"
 
-        # Exchange Auth0 id_token for Ayla token
-        try:
-            ayla_tokens = await self._exchange_ayla_token(auth0_tokens["id_token"])
-        except Exception:
-            _LOGGER.exception("Failed to exchange Ayla token")
-            errors["callback_url"] = "auth_failed"
-            return self.async_show_form(
-                step_id="user",
-                data_schema=vol.Schema(
-                    {vol.Required("callback_url"): str}
-                ),
-                description_placeholders={
-                    "authorize_url": self._authorize_url or "",
-                },
-                errors=errors,
-            )
+            if not errors:
+                data = {
+                    CONF_ACCESS_TOKEN: ayla_tokens["access_token"],
+                    CONF_REFRESH_TOKEN: ayla_tokens["refresh_token"],
+                    CONF_ID_TOKEN: auth0_tokens["id_token"],
+                    CONF_USERNAME: username,
+                }
 
-        # Build config entry data
-        data = {
-            CONF_ACCESS_TOKEN: ayla_tokens["access_token"],
-            CONF_REFRESH_TOKEN: ayla_tokens["refresh_token"],
-            CONF_ID_TOKEN: auth0_tokens["id_token"],
-            CONF_USERNAME: self._email_from_id_token(auth0_tokens["id_token"]),
-        }
+                await self.async_set_unique_id(username)
+                self._abort_if_unique_id_configured()
 
-        unique_id = data[CONF_USERNAME]
-        await self.async_set_unique_id(unique_id)
-        self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=f"Shark IQ ({username})", data=data
+                )
 
-        return self.async_create_entry(title=f"Shark IQ ({unique_id})", data=data)
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
+            errors=errors,
+        )
 
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> ConfigFlowResult:
-        """Handle reauth — same as user flow."""
+        """Handle reauth."""
         return await self.async_step_user()
 
-    @staticmethod
-    def _email_from_id_token(id_token: str) -> str:
-        """Extract email from JWT id_token without verification."""
-        try:
-            payload = id_token.split(".")[1]
-            # Add padding
-            payload += "=" * (4 - len(payload) % 4)
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            return claims.get("email", "shark_user")
-        except Exception:
-            return "shark_user"
+    async def _do_auth0_login(
+        self, username: str, password: str
+    ) -> dict[str, Any]:
+        """Perform Auth0 browser-sim login (3-step: authorize → /u/login → token exchange).
 
-    async def _exchange_code(self, code: str) -> dict[str, Any]:
-        """Exchange authorization code for Auth0 tokens via PKCE."""
-        token_url = f"{AUTH0_URL}/oauth/token"
-        payload = {
-            "grant_type": "authorization_code",
-            "client_id": AUTH0_CLIENT_ID,
-            "code_verifier": self._code_verifier,
-            "code": code,
-            "redirect_uri": AUTH0_REDIRECT_URI,
+        This mimics what the SharkClean mobile app does, bypassing the
+        IdP redirect that blocks normal browser PKCE flow.
+        """
+        headers = {
+            "User-Agent": BROWSER_UA,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": AUTH0_URL,
+            "Referer": AUTH0_URL + "/",
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(token_url, json=payload) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                _LOGGER.debug("Auth0 token exchange successful")
-                return data
+
+        jar = aiohttp.CookieJar(unsafe=True)
+        async with aiohttp.ClientSession(cookie_jar=jar) as session:
+            # Step 1: GET /authorize — follow redirects to get the state param
+            authorize_url = (
+                f"{AUTH0_URL}/authorize?"
+                f"os=android&response_type=code&client_id={AUTH0_CLIENT_ID}"
+                f"&redirect_uri={AUTH0_REDIRECT_URI}&scope={AUTH0_SCOPES}"
+            )
+            async with session.get(
+                authorize_url, headers=headers, allow_redirects=True
+            ) as resp:
+                parsed = urlparse(str(resp.url))
+                state = parse_qs(parsed.query).get("state", [None])[0]
+
+            if not state:
+                raise AuthInvalid("No state returned from /authorize")
+
+            # Step 2: POST /u/login with credentials
+            login_url = f"{AUTH0_URL}/u/login?state={state}"
+            form_data = {
+                "state": state,
+                "username": username,
+                "password": password,
+                "action": "default",
+            }
+            async with session.post(
+                login_url,
+                headers=headers,
+                data=form_data,
+                allow_redirects=False,
+            ) as resp:
+                redirect_url = resp.headers.get("Location", "")
+
+            # Extract authorization code from redirect chain
+            code = None
+
+            if redirect_url.startswith("/authorize/resume"):
+                # Follow the resume redirect to get the final callback with code
+                resume_url = AUTH0_URL + redirect_url
+                async with session.get(
+                    resume_url, headers=headers, allow_redirects=False
+                ) as resp:
+                    final_url = resp.headers.get("Location", "")
+                    if final_url:
+                        parsed = urlparse(final_url)
+                        code = parse_qs(parsed.query).get("code", [None])[0]
+            elif redirect_url.startswith(AUTH0_REDIRECT_URI):
+                # Direct redirect to callback
+                parsed = urlparse(redirect_url)
+                code = parse_qs(parsed.query).get("code", [None])[0]
+
+            if not code:
+                # Check if it's a rate limit or bad credentials
+                if "429" in redirect_url or "blocked" in redirect_url.lower():
+                    raise AuthRateLimited("Login rate limited (429)")
+                if redirect_url.startswith("/u/login"):
+                    # Redirected back to login = bad credentials
+                    raise AuthInvalid("Invalid username or password")
+                raise AuthInvalid(f"Auth0 login failed, redirect: {redirect_url}")
+
+            # Step 3: Exchange code for tokens
+            token_url = f"{AUTH0_URL}/oauth/token"
+            payload = {
+                "grant_type": "authorization_code",
+                "client_id": AUTH0_CLIENT_ID,
+                "code": code,
+                "redirect_uri": AUTH0_REDIRECT_URI,
+            }
+            async with session.post(
+                token_url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+            ) as resp:
+                token_data = await resp.json()
+
+            if "id_token" not in token_data:
+                raise AuthInvalid(
+                    f"Auth0 did not return id_token: {token_data.get('error_description', 'unknown')}"
+                )
+
+            return token_data
 
     async def _exchange_ayla_token(self, id_token: str) -> dict[str, Any]:
         """Exchange Auth0 id_token for Ayla Networks access/refresh tokens."""
@@ -208,3 +213,11 @@ class SharkIqConfigFlow(ConfigFlow, domain=DOMAIN):
                 data = await resp.json()
                 _LOGGER.debug("Ayla token exchange successful")
                 return data
+
+
+class AuthRateLimited(Exception):
+    """Auth0 rate limited the login attempt."""
+
+
+class AuthInvalid(Exception):
+    """Invalid credentials."""

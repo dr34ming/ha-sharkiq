@@ -3,15 +3,18 @@
     "step": {
       "user": {
         "title": "Shark IQ Login",
-        "description": "1. Open this URL in your browser:\n\n{authorize_url}\n\n2. Log in with your SharkNinja account\n3. After login, your browser will try to open a `com.sharkninja.shark://` URL that won't load — that's expected\n4. Copy the FULL URL from the address bar and paste it below",
+        "description": "Sign in with your SharkClean account. Tokens are persisted and auto-refreshed so you only need to do this once.",
         "data": {
-          "callback_url": "Callback URL"
+          "username": "Email",
+          "password": "Password"
         }
       }
     },
     "error": {
-      "no_code": "Could not find authorization code in the URL. Make sure you copied the full callback URL.",
-      "auth_failed": "Authentication failed. Please try again."
+      "invalid_auth": "Invalid username or password.",
+      "rate_limited": "Login rate limited by SharkNinja (429). Wait a few minutes and try again.",
+      "cannot_connect": "Could not connect to Shark/Ayla services.",
+      "unknown": "An unexpected error occurred."
     },
     "abort": {
       "already_configured": "This Shark account is already configured."
